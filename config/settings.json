@@ -1,0 +1,46 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "CLAUDE_STATUSLINE_RATIO=45 bash ~/.claude/statusline-command.sh"
+  },
+  "language": "Russian",
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "Agent",
+      "WebFetch",
+      "WebSearch",
+      "NotebookEdit",
+      "mcp__*"
+    ]
+  },
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '⚠ ВНИМАНИЕ: Контекст почти заполнен. Перед компактификацией убедись что: 1) Прогресс сохранён в память 2) Изменения закоммичены и запушены 3) Текущая задача и следующие шаги записаны'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -d .git ] && [ -n \"$(git status --porcelain 2>/dev/null)\" ]; then echo '📌 Есть незакоммиченные изменения в git. Не забудь сохранить (команда Сохрани)'; fi"
+          }
+        ]
+      }
+    ]
+  }
+}
