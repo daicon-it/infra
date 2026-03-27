@@ -116,7 +116,7 @@ step_zsh_install() {
         apt-get install -y zsh
     fi
     log "Installing vps-zsh-config..."
-    bash <(curl -fsSL https://raw.githubusercontent.com/daicon-it/vps-zsh-config/main/install.sh) || warn "vps-zsh-config install failed (non-critical)"
+    bash <(curl -fsSL "$REPO_INFRA/zsh/install.sh") || warn "vps-zsh-config install failed (non-critical)"
     # Set default shell
     if [[ "$(getent passwd "$(whoami)" | cut -d: -f7)" != *"zsh"* ]]; then
         chsh -s "$(which zsh)" 2>/dev/null || warn "Could not set zsh as default shell"
@@ -125,47 +125,78 @@ step_zsh_install() {
 }
 
 # ── Step 5: Skills ──────────────────────────────────────────────────
+
+discover_skills() {
+    # Auto-discover skill directories from GitHub API
+    curl -sf "https://api.github.com/repos/daicon-it/skills/contents/" 2>/dev/null \
+        | python3 -c "import json,sys; [print(d['name']) for d in json.load(sys.stdin) if d['type']=='dir']" 2>/dev/null
+}
+
+install_skill() {
+    local skill_name="$1"
+    local skill_dir="$HOME/.claude/skills/$skill_name"
+
+    if [[ -f "$skill_dir/SKILL.md" ]] && [[ "$FORCE" != "true" ]]; then
+        ok "$skill_name already installed"
+        return
+    fi
+
+    log "Installing $skill_name..."
+    mkdir -p "$skill_dir"
+
+    # Download SKILL.md (required)
+    if ! curl -fsSL "$REPO_SKILLS/$skill_name/SKILL.md" -o "$skill_dir/SKILL.md" 2>/dev/null; then
+        warn "$skill_name — no SKILL.md found, skipping"
+        rm -rf "$skill_dir"
+        return
+    fi
+
+    # Download subdirectories (references/, scripts/) if they exist
+    local api_url="https://api.github.com/repos/daicon-it/skills/contents/$skill_name"
+    local subdirs
+    subdirs=$(curl -sf "$api_url" 2>/dev/null \
+        | python3 -c "import json,sys; [print(d['name']) for d in json.load(sys.stdin) if d['type']=='dir']" 2>/dev/null || true)
+
+    local file_count=1
+    for subdir in $subdirs; do
+        mkdir -p "$skill_dir/$subdir"
+        # Get files in subdir
+        local subfiles
+        subfiles=$(curl -sf "$api_url/$subdir" 2>/dev/null \
+            | python3 -c "import json,sys; [print(d['name']) for d in json.load(sys.stdin) if d['type']=='file']" 2>/dev/null || true)
+        for f in $subfiles; do
+            [[ -z "$f" ]] && continue
+            curl -fsSL "$REPO_SKILLS/$skill_name/$subdir/$f" -o "$skill_dir/$subdir/$f" 2>/dev/null || continue
+            [[ "$f" == *.sh ]] && chmod +x "$skill_dir/$subdir/$f"
+            file_count=$((file_count + 1))
+        done
+    done
+
+    ok "$skill_name installed ($file_count files)"
+}
+
 step_skills_install() {
     step_header 5 "Claude Code Skills"
-    local skills_dir="$HOME/.claude/skills"
-    mkdir -p "$skills_dir"
+    mkdir -p "$HOME/.claude/skills"
 
-    # skills-db
-    local sd="$skills_dir/skills-db"
-    if [[ -f "$sd/SKILL.md" ]] && [[ "$FORCE" != "true" ]]; then
-        ok "skills-db skill already installed"
-    else
-        mkdir -p "$sd"
-        get_file "skills-db/SKILL.md" "$sd/SKILL.md" "$REPO_SKILLS"
-        ok "skills-db skill installed"
+    # Auto-discover all skills from daicon-it/skills repo
+    log "Discovering skills from daicon-it/skills..."
+    local skill_list
+    skill_list=$(discover_skills)
+
+    if [[ -z "$skill_list" ]]; then
+        warn "Could not fetch skill list from GitHub API, using fallback"
+        skill_list="skills-db devops-agent watchdog-agent"
     fi
 
-    # devops-agent
-    local da="$skills_dir/devops-agent"
-    if [[ -f "$da/SKILL.md" ]] && [[ "$FORCE" != "true" ]]; then
-        ok "devops-agent skill already installed"
-    else
-        mkdir -p "$da/references" "$da/scripts"
-        get_file "devops-agent/SKILL.md" "$da/SKILL.md" "$REPO_SKILLS"
-        for ref in proxmox-lxc tailscale-net postgres-ops systemd-docker troubleshooting; do
-            get_file "devops-agent/references/$ref.md" "$da/references/$ref.md" "$REPO_SKILLS"
-        done
-        for scr in health-check.sh skills-db-query.sh; do
-            get_file "devops-agent/scripts/$scr" "$da/scripts/$scr" "$REPO_SKILLS"
-            chmod +x "$da/scripts/$scr"
-        done
-        ok "devops-agent skill installed"
-    fi
+    local count=0
+    while IFS= read -r skill_name; do
+        [[ -z "$skill_name" ]] && continue
+        install_skill "$skill_name"
+        count=$((count + 1))
+    done <<< "$skill_list"
 
-    # watchdog-agent
-    local wa="$skills_dir/watchdog-agent"
-    if [[ -f "$wa/SKILL.md" ]] && [[ "$FORCE" != "true" ]]; then
-        ok "watchdog-agent skill already installed"
-    else
-        mkdir -p "$wa"
-        get_file "watchdog-agent/SKILL.md" "$wa/SKILL.md" "$REPO_SKILLS"
-        ok "watchdog-agent skill installed"
-    fi
+    ok "Total: $count skills processed"
 }
 
 # ── Step 6: Health Check ────────────────────────────────────────────
@@ -176,7 +207,7 @@ step_health_check() {
     # Claude
     if command -v claude &>/dev/null || [[ -f "$HOME/.local/bin/claude" ]]; then
         ok "Claude CLI"
-    else err "Claude CLI not found"; ((fails++)); fi
+    else err "Claude CLI not found"; fails=$((fails + 1)); fi
 
     # Codex
     if command -v codex &>/dev/null; then
@@ -194,13 +225,19 @@ step_health_check() {
     else warn "ZSH not found"; fi
 
     # Config files
-    [[ -f "$HOME/.claude/settings.json" ]] && ok "settings.json" || { err "settings.json missing"; ((fails++)); }
+    [[ -f "$HOME/.claude/settings.json" ]] && ok "settings.json" || { err "settings.json missing"; fails=$((fails + 1)); }
     [[ -x "$HOME/.claude/statusline-command.sh" ]] && ok "statusline-command.sh" || warn "statusline-command.sh missing"
 
-    # Skills
-    [[ -f "$HOME/.claude/skills/skills-db/SKILL.md" ]] && ok "skills-db skill" || warn "skills-db skill missing"
-    [[ -f "$HOME/.claude/skills/devops-agent/SKILL.md" ]] && ok "devops-agent skill" || warn "devops-agent skill missing"
-    [[ -f "$HOME/.claude/skills/watchdog-agent/SKILL.md" ]] && ok "watchdog-agent skill" || warn "watchdog-agent skill missing"
+    # Skills (dynamic check)
+    local skill_count=0
+    for sd in "$HOME/.claude/skills"/*/SKILL.md; do
+        [[ -f "$sd" ]] || continue
+        local sname
+        sname=$(basename "$(dirname "$sd")")
+        ok "skill: $sname"
+        skill_count=$((skill_count + 1))
+    done
+    [[ $skill_count -eq 0 ]] && warn "No skills installed" || log "$skill_count skill(s) installed"
 
     # Skills-DB API
     if curl -sf "http://100.115.152.102:8410/health" &>/dev/null; then
